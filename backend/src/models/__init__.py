@@ -3,5 +3,8 @@ from .audit import Audit
 from .library import SpectralLibrary
 from .endmember import Endmember
 from .sample import MixtureSample
+from .source import SpectrumSource
 from .unmix_run import UnmixRun
+from .run_source import RunSourceLink
+from .run_control import RunControl
 from .note import ReplicationNote

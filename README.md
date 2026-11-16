@@ -21,7 +21,18 @@ docker compose exec -T backend python -m scripts.seed_demo
 | 光谱研究员 analyst | analyst@lengsha.demo | Lengsha2026! | 核对来源、创建研究、编辑样本批注、提交复配建议 |
 | 修复阅读者 viewer | viewer@lengsha.demo | Lengsha2026! | 查看全部页面及审计、下载获批研究CSV |
 
-后端JWT验证角色；隐藏按钮以外，写操作真实执行403。任何认证用户可读研究；未获批研究禁止导出，完成且至少有一份获批建议才可下载。已审阅建议不可重复审批。登录IP每分钟最多30次，全局错误处理中间件统一未知异常响应，所有登录/写入/worker完成写入审计。
+后端JWT验证角色；隐藏按钮以外，写操作真实执行403。任何认证用户可读研究；未获批研究禁止导出，完成且至少有一份获批建议且批准哈希与当前结果一致才可下载。已审阅建议不可重复审批。登录IP每分钟最多30次，全局错误处理中间件统一未知异常响应，所有登录/写入/worker完成写入审计。
+
+## 测谱来源、撤销与替代
+
+每份混合样本可有一份或多份测谱来源 `SpectrumSource`（实测谱 `measured` / 替代谱 `replacement`）。研究创建时把所用来源冻结进 `RunSourceLink`，因此“研究→样本→测谱”的来源关系可回溯。撤销测谱不删除数据：`status=revoked`、原因、撤销时间保留，原谱数值、原始结果、复配建议与审阅记录都继续可查。
+
+- **页面入口**：`端元与样本` 每行“测谱来源”展开来源面板，可撤销当前测谱并登记替代谱（2–64个波段，须与库波段数一致、有限且在±1000内）。须先撤销全部有效测谱才能登记替代谱，替代谱自动成为当前有效来源。
+- **影响范围**：同页“来源撤销影响范围”与首页顶部 `ImpactPanel` 展示撤销来源数、受影响研究、替代进行中/完成/受阻数量及逐研究失败原因；来源关系回溯到所有冻结引用该测谱的研究。已有研究在读取时补齐来源关系（`ensure_all_links`），补齐后与新研究同样受控。
+- **发布闸门**：撤销后 `RunControl.publish_state=revoked`。新建研究若含无有效谱的样本直接 422；排队/计算中的研究一律 `blocked`，worker 在提交结果的同一事务内复查闸门并用比较交换（`status=running AND job_token=本次令牌`）写入，晚到的计算无法恢复污染结果。已获批研究停止导出，也不能再提交或批准复配建议。
+- **替代研究**：每个原研究至多一份替代研究（`run_controls.replacement_of_run_id` 唯一 + 行锁 + savepoint），沿用原名称、样本集合、端元快照、sigma、重复数与根种子。仅重算受影响样本，其余样本的逐次配比、RSS、分位按归档结果原样复用（`reused_from_run_id`），计算前校验观测谱一致。原研究结果不可用（如排队中即被撤销）时全部样本按当前有效谱重算。后续再撤销该研究其他样本时，只原地刷新这一份替代研究，不会生成“替代的替代”。
+- **恢复与重试**：worker 启动时清空并重建队列（以数据库状态为准），`running` 任务回到 `queued` 重新投递；已提交结果不会重算，重复投递是空操作。`POST /runs/{id}/replacement/retry` 只重排队同一份替代研究，不新建。替代失败/受阻原因在页面 `SourceGate` 与影响表显示。
+- **批准绑定**：`ReplicationNote.approved_hash` 记录批准时的结果指纹；结果被重算后旧批准不再授权导出，须重新审阅。`python -m scripts.backfill_sources` 为旧库补来源与链接，并把旧批准绑定到当时的结果指纹。
 
 ## 一天的工作
 
@@ -36,7 +47,7 @@ docker compose exec -T backend python -m scripts.seed_demo
 
 ## 六页与实体
 
-首页、端元与样本、解混配置、配比与残差、复配审阅、研究留痕。五个业务实体 `SpectralLibrary / Endmember / MixtureSample / UnmixRun / ReplicationNote` 均具备表、model、schema、service、route、前端API、store与页面/组件；另有User/Audit。输入库/端元/观测向量在运行创建时冻结，后续批注不改历史结果。
+首页、端元与样本、解混配置、配比与残差、复配审阅、研究留痕。五个业务实体 `SpectralLibrary / Endmember / MixtureSample / UnmixRun / ReplicationNote` 均具备表、model、schema、service、route、前端API、store与页面/组件；另有User/Audit，以及来源治理实体 `SpectrumSource / RunSourceLink / RunControl`（来源面板 `SourcePanel`、发布闸门 `SourceGate`、影响面板 `ImpactPanel` 跨页复用）。输入库/端元/观测向量在运行创建时冻结，后续批注不改历史结果。
 
 三个库各40混合样本、4端元×12波段，共120样本/12端元。LS-A可辨识，LS-B近共线拒绝，LS-C含10份偏离线性模型样本。所有演示数据均为固定种子的合成谱，不是材料实测。真配比未提供给算法。连续标量 `noise_sigma` 使用MySQL DOUBLE，光谱/比例数组使用JSON双精度浮点，避免单精度改变输入。
 
@@ -80,4 +91,4 @@ npm run dev
 
 `.env` 参数有 COMPOSE_PROJECT_NAME、FRONTEND_PORT、BACKEND_PORT、DB_PORT、JWT_SECRET、SEED_DEMO；后端 DATABASE_URL、REDIS_URL 在Compose服务环境中定义。`.env`、构建目录、缓存与日志已忽略。角色枚举：`backend/src/constants/roles.py`、`frontend/src/constants/enums.ts`；运行状态：`backend/src/constants/status.py`、同一前端enums；审阅状态：`backend/src/schemas/note.py` Literal与前端ReviewStatus、model/default/service引用。共享枚举参与鉴权、worker状态与页面标签。
 
-测试、真实截图、健康快照及已知差异在同批 `test-artifacts/gb-0019/TESTING.md`，源码不包含测试产物。当前实现是单worker本地研究系统，服务中断后的任务恢复/多worker去重、库上传管理、实测光谱校准、称量设备控制不在本项目范围。清理：`docker compose down -v --remove-orphans`（删除演示卷）。MIT License。
+测试、真实截图、健康快照及已知差异在同批 `test-artifacts/gb-0019/TESTING.md`，源码不包含测试产物。`backend/tests/` 使用 SQLite + fakeredis 覆盖撤销、替代复用、晚到 worker、中断恢复、并发去重与补齐来源关系，运行：`cd backend && python -m pytest tests -q`。当前实现是单worker本地研究系统（任务恢复与重复投递去重已覆盖），库上传管理、实测光谱校准、称量设备控制不在本项目范围。清理：`docker compose down -v --remove-orphans`（删除演示卷）。MIT License。
